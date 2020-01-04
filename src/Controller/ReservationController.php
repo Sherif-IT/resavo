@@ -20,6 +20,7 @@ use Symfony\Component\Routing\Annotation\Route;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\Security;
 use Symfony\Component\HttpFoundation\Session\SessionInterface;
 use Doctrine\ORM\EntityManagerInterface;
+use Psr\Log\LoggerInterface;
 
 /**
  * @Route("/reservation")
@@ -30,13 +31,19 @@ class ReservationController extends AbstractController
     private $check;
     private $manager;
     private $session;
+    private $logger;
 
-    public function __construct(EntityManagerInterface $manager, NotificationController $notif, CheckReservationController $check, SessionInterface $session)
+    public function __construct(EntityManagerInterface $manager,
+                                NotificationController $notif,
+                                CheckReservationController $check,
+                                SessionInterface $session,
+                                LoggerInterface $logger)
     {
         $this->notif = $notif;
         $this->check = $check;
         $this->manager = $manager;
         $this->session = $session;
+        $this->logger = $logger;
     }
 
     /**
@@ -128,10 +135,11 @@ class ReservationController extends AbstractController
         $reservation = $this->createReservation();
         $user = $this->getUser();
         $pay = $this->session->get('pay');
+        $this->logger->info('Création de la réservation -- ' . $this->getUser()->getEmail());
 
         if ($this->check->verifPaiment($pay, $reservation)) {
             $paiement = $this->manager->getRepository(Paypal::class)->find($pay);
-
+            $this->logger->info('Enregistrement de la réservation -- ' . $this->getUser()->getEmail());
             $reservation->setPaiement($paiement);
             $reservation->setUser($user);
             $this->manager->persist($reservation);
@@ -163,10 +171,18 @@ class ReservationController extends AbstractController
      */
     public function authorizePaiement(Request $request)
     {
+        $this->logger->info('======== Procédure de paiement ========');
         $this->session->remove('pay');
         $data = $request->request->get('authorization');
         $authID = $request->request->get('authorizationID');
         $this->session->set('authorizationID', $authID);
+
+        if (null == $authID)
+        {
+            $this->logger->error('Aucune authorizationID envoyé');
+            throw new Exception('Aucune authorizationID envoyé');
+        }
+        $this->logger->info('authorizationID : ' . $data['id'] . ' User e-mail : ' . $this->getUser()->getEmail());
 
         $data = GetOrder::getOrder($data['id']);
        if ($data['status'] == 'COMPLETED') {
@@ -193,11 +209,13 @@ class ReservationController extends AbstractController
     public function capturePaiement(Reservation $reservation, $paiement)
     {
         try {
+            $this->logger->info('Capture du paiement -- User e-mail : ' . $this->getUser()->getEmail());
             $response = CaptureAuthorization::captureAuth($this->session->get('authorizationID'));
             $captureId = $response->result->id;
             if ("COMPLETED" !== $response->result->status) {
                 $this->manager->remove($paiement);
                 $this->manager->remove($reservation);
+                $this->logger->error('Paiement non capturé -- suppression de la réservation User e-mail : ' . $this->getUser()->getEmail());
                 $this->manager->flush();
                 $this->addFlash('danger', 'Un problème d\'approvissionement est survenu');
 
@@ -212,8 +230,9 @@ class ReservationController extends AbstractController
             return true;
         } catch (Exception $e) {
             $e->getMessage();
-            $this->manager->remove($paiment);
+            $this->manager->remove($paiement);
             $this->manager->remove($reservation);
+            $this->logger->error('Paiement non capturé -- suppression de la réservation User e-mail : ' . $this->getUser()->getEmail());
             $this->manager->flush();
             $this->addFlash('danger', 'Un problème d\'approvissionement est survenu');
 
